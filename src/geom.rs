@@ -70,48 +70,6 @@ pub fn contains(r: Rect, px: i32, py: i32) -> bool {
     px >= r.0 && px <= r.0 + r.2 && py >= r.1 && py <= r.1 + r.3
 }
 
-/// Outline of a rounded rectangle grown by `d` on every side, clockwise from the top-left arc.
-/// Every call with the same `seg` returns the same number of points, so outlines at two
-/// offsets pair up point-for-point into a ring.
-pub fn rounded_rect(sel: Rect, r: f64, d: f64, seg: usize) -> Vec<(f64, f64)> {
-    (0..4).flat_map(|c| corner_arc(sel, r, d, c, seg)).collect()
-}
-
-/// Arc points of corner `c` (0 = top-left, clockwise) of `rounded_rect`.
-pub fn corner_arc(sel: Rect, r: f64, d: f64, c: usize, seg: usize) -> Vec<(f64, f64)> {
-    let (x, y, w, h) = (sel.0 as f64, sel.1 as f64, sel.2 as f64, sel.3 as f64);
-    let r = r.min(w / 2.0).min(h / 2.0).max(0.0);
-    let (cx, cy) = [(x + r, y + r), (x + w - r, y + r), (x + w - r, y + h - r), (x + r, y + h - r)][c];
-    let start = std::f64::consts::PI * (1.0 + c as f64 * 0.5);
-    (0..=seg)
-        .map(|i| {
-            let a = start + std::f64::consts::FRAC_PI_2 * i as f64 / seg as f64;
-            (cx + (r + d) * a.cos(), cy + (r + d) * a.sin())
-        })
-        .collect()
-}
-
-/// Lens-style corner bracket: corner `c`'s arc plus straight arms of length `arm` along both edges.
-pub fn bracket(sel: Rect, r: f64, d: f64, c: usize, arm: f64, seg: usize) -> Vec<(f64, f64)> {
-    let mut pts = corner_arc(sel, r, d, c, seg);
-    let start = std::f64::consts::PI * (1.0 + c as f64 * 0.5);
-    let end = start + std::f64::consts::FRAC_PI_2;
-    // clockwise tangent at angle a is (-sin a, cos a)
-    let (f, l) = (pts[0], pts[seg]);
-    pts.insert(0, (f.0 + arm * start.sin(), f.1 - arm * start.cos()));
-    pts.push((l.0 - arm * end.sin(), l.1 + arm * end.cos()));
-    pts
-}
-
-/// Interleave two matching outlines into a triangle strip covering the band between them.
-pub fn strip(outer: &[(f64, f64)], inner: &[(f64, f64)], closed: bool) -> Vec<(f64, f64)> {
-    let mut out: Vec<_> = outer.iter().zip(inner).flat_map(|(a, b)| [*a, *b]).collect();
-    if closed {
-        out.extend([outer[0], inner[0]]);
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,18 +111,5 @@ mod tests {
         assert!(full[1].0 + full[1].2 <= W);
         let right = b((1800, 100, 100, 100));
         assert!(right[1].0 + right[1].2 <= W);
-    }
-
-    #[test]
-    fn outlines_pair_up() {
-        let sel = (10, 10, 100, 50);
-        assert_eq!(rounded_rect(sel, 12.0, 0.0, 6).len(), rounded_rect(sel, 12.0, 8.0, 6).len());
-        // top-left arc starts on the left edge and ends on the top edge
-        let arc = corner_arc(sel, 12.0, 0.0, 0, 6);
-        assert!((arc[0].0 - 10.0).abs() < 1e-9 && (arc[6].1 - 10.0).abs() < 1e-9);
-        // bracket arms run down the left edge and along the top edge
-        let b = bracket(sel, 12.0, 0.0, 0, 20.0, 6);
-        assert!((b[0].0 - 10.0).abs() < 1e-9 && (b[0].1 - 42.0).abs() < 1e-9);
-        assert!((b[8].0 - 42.0).abs() < 1e-9 && (b[8].1 - 10.0).abs() < 1e-9);
     }
 }

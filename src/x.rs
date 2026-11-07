@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use x11rb::connection::Connection;
 use x11rb::cursor;
-use x11rb::protocol::render::{self, ConnectionExt as _, Color, Fixed, PictOp, Pictformat, Picture, Pointfix};
+use x11rb::protocol::render::{self, ConnectionExt as _, Color, CreatePictureAux, Fixed, PictOp, Pictformat, Picture, Pointfix, Repeat};
 use x11rb::protocol::xproto::*;
 use x11rb::rust_connection::RustConnection;
 use x11rb::{resource_manager, COPY_DEPTH_FROM_PARENT, NONE};
@@ -49,6 +49,14 @@ impl X {
 
         let db = resource_manager::new_from_default(&conn)?;
         let dpi = db.get_value::<u32>("Xft.dpi", "").ok().flatten().unwrap_or(96);
+        // x11rb only reads XCURSOR_* / Xcursor.*; desktops like Cinnamon publish the theme via
+        // XSETTINGS instead, so without this the overlay shows a different cursor than every app.
+        let xs = xsettings(&conn, sn).unwrap_or_default();
+        for (key, env) in [("Gtk/CursorThemeName", "XCURSOR_THEME"), ("Gtk/CursorThemeSize", "XCURSOR_SIZE")] {
+            if let (Some(v), None) = (xs.get(key), std::env::var_os(env)) {
+                std::env::set_var(env, v); // single-threaded here, before anything reads the env
+            }
+        }
         let cursors = cursor::Handle::new(&conn, sn, &db)?.reply()?;
 
         let formats = conn.render_query_pict_formats()?.reply()?;
@@ -200,11 +208,14 @@ impl X {
         Ok(p)
     }
 
-    /// Conical (sweep) gradient around (cx, cy), starting at `angle` degrees.
-    pub fn sweep(&self, cx: f64, cy: f64, angle: f64, stops: &[(f64, Color)]) -> Res<Picture> {
+    /// Linear gradient from p1 to p2 in screen coordinates (use with `composite`'s identity alignment).
+    /// Linear, not conical: the X server draws conical gradients on the CPU (~7x slower here).
+    pub fn linear(&self, p1: (f64, f64), p2: (f64, f64), stops: &[(f64, Color)]) -> Res<Picture> {
         let p = self.conn.generate_id()?;
         let (s, c): (Vec<Fixed>, Vec<Color>) = stops.iter().map(|(s, c)| (fixed(*s), *c)).unzip();
-        self.conn.render_create_conical_gradient(p, pf(cx, cy), fixed(angle), &s, &c)?;
+        self.conn.render_create_linear_gradient(p, pf(p1.0, p1.1), pf(p2.0, p2.1), &s, &c)?;
+        // extend the end colours beyond p1/p2 (the default leaves those pixels transparent)
+        self.conn.render_change_picture(p, &render::ChangePictureAux::new().repeat(Repeat::PAD))?;
         Ok(p)
     }
 
@@ -223,27 +234,21 @@ impl X {
         Ok(())
     }
 
-    /// Anti-aliased filled polygon: fan from `center` through `outline`, painted with `src`
-    /// at identity alignment (screen pixel (x, y) takes source pixel (x, y)).
-    pub fn fan(&self, src: Picture, center: (i32, i32), outline: &[(f64, f64)]) -> Res<()> {
-        let mut pts = vec![pf(center.0 as f64, center.1 as f64)];
-        pts.extend(outline.iter().map(|p| pf(p.0, p.1)));
-        pts.push(pf(outline[0].0, outline[0].1));
-        // Render aligns the source so (src_x, src_y) sits at the first point (truncated).
-        self.conn.render_tri_fan(PictOp::OVER, src, self.back, self.a8, center.0 as i16, center.1 as i16, &pts)?;
+    /// Paint `src` over `dst` rect (x, y, w, h) through an optional A8 `mask` whose pixel
+    /// (mx, my) lands at (x, y). The source is aligned 1:1 with the screen. Only plain
+    /// composites are used for drawing: X's anti-aliased triangles fall back to the CPU
+    /// and cost 10-60 ms each at 4K.
+    pub fn composite(&self, src: Picture, mask: Option<Picture>, (mx, my): (i32, i32), (x, y, w, h): (i32, i32, i32, i32)) -> Res<()> {
+        if w > 0 && h > 0 {
+            let (x16, y16) = (x as i16, y as i16);
+            let m = mask.unwrap_or(NONE);
+            self.conn.render_composite(PictOp::OVER, src, m, self.back, x16, y16, mx as i16, my as i16, x16, y16, w as u16, h as u16)?;
+        }
         Ok(())
     }
 
-    /// Anti-aliased triangle strip (from `geom::strip`), painted with `src` at identity alignment.
-    pub fn strip(&self, src: Picture, pts: &[(f64, f64)]) -> Res<()> {
-        let fx: Vec<_> = pts.iter().map(|p| pf(p.0, p.1)).collect();
-        let (sx, sy) = (pts[0].0 as i16, pts[0].1 as i16);
-        self.conn.render_tri_strip(PictOp::OVER, src, self.back, self.a8, sx, sy, &fx)?;
-        Ok(())
-    }
-
-    /// Upload an 8-bit coverage bitmap (e.g. rendered text) as an A8 mask picture.
-    pub fn upload_mask(&self, data: &[u8], w: usize, h: usize) -> Res<Picture> {
+    /// Upload an 8-bit coverage bitmap (text, shape) as an A8 mask picture; `repeat` tiles it.
+    pub fn upload_mask(&self, data: &[u8], w: usize, h: usize, repeat: bool) -> Res<Picture> {
         let stride = w.div_ceil(4) * 4; // X scanlines are padded to 32 bits
         let mut padded = vec![0u8; stride * h];
         for (dst, src) in padded.chunks_exact_mut(stride).zip(data.chunks_exact(w)) {
@@ -256,24 +261,66 @@ impl X {
         self.conn.put_image(ImageFormat::Z_PIXMAP, pix, gc, w as u16, h as u16, 0, 0, 0, 8, &padded)?;
         self.conn.free_gc(gc)?;
         let pic = self.conn.generate_id()?;
-        self.conn.render_create_picture(pic, pix, self.a8, &Default::default())?;
+        let aux = CreatePictureAux::new().repeat(if repeat { Repeat::NORMAL } else { Repeat::NONE });
+        self.conn.render_create_picture(pic, pix, self.a8, &aux)?;
         self.conn.free_pixmap(pix)?;
         Ok(pic)
     }
 
-    /// Paint `src` through an A8 `mask` of size (w, h) at (x, y).
-    pub fn masked(&self, src: Picture, mask: Picture, x: i32, y: i32, w: usize, h: usize) -> Res<()> {
-        self.conn
-            .render_composite(PictOp::OVER, src, mask, self.back, 0, 0, 0, 0, x as i16, y as i16, w as u16, h as u16)?;
+    /// Copy the frozen screen into the frame at the same place.
+    pub fn copy_shot(&self, (x, y, w, h): (i32, i32, i32, i32)) -> Res<()> {
+        if w > 0 && h > 0 {
+            let (x16, y16) = (x as i16, y as i16);
+            self.conn.render_composite(PictOp::SRC, self.shot, NONE, self.back, x16, y16, 0, 0, x16, y16, w as u16, h as u16)?;
+        }
         Ok(())
     }
+}
 
-    /// Paint the frozen screen over the whole frame.
-    pub fn paint_shot(&self) -> Res<()> {
-        let (w, h) = (self.w as u16, self.h as u16);
-        self.conn.render_composite(PictOp::SRC, self.shot, NONE, self.back, 0, 0, 0, 0, 0, 0, w, h)?;
-        Ok(())
+/// String and integer XSETTINGS (Gtk/CursorThemeName, ...) from the settings manager.
+fn xsettings(conn: &RustConnection, screen: usize) -> Res<std::collections::HashMap<String, String>> {
+    let atom = |name: &str| -> Res<Atom> { Ok(conn.intern_atom(false, name.as_bytes())?.reply()?.atom) };
+    let owner = conn.get_selection_owner(atom(&format!("_XSETTINGS_S{screen}"))?)?.reply()?.owner;
+    if owner == NONE {
+        return Ok(Default::default());
     }
+    let prop = conn.get_property(false, owner, atom("_XSETTINGS_SETTINGS")?, AtomEnum::ANY, 0, 1 << 16)?.reply()?;
+    Ok(parse_xsettings(&prop.value).unwrap_or_default())
+}
+
+/// Parse the XSETTINGS wire format; colours are skipped. None on malformed data.
+fn parse_xsettings(d: &[u8]) -> Option<std::collections::HashMap<String, String>> {
+    let le = *d.first()? == 0;
+    let u16_at = |i: usize| d.get(i..i + 2).map(|b| if le { u16::from_le_bytes([b[0], b[1]]) } else { u16::from_be_bytes([b[0], b[1]]) });
+    let u32_at = |i: usize| {
+        d.get(i..i + 4).map(|b| {
+            let a = [b[0], b[1], b[2], b[3]];
+            if le { u32::from_le_bytes(a) } else { u32::from_be_bytes(a) }
+        })
+    };
+    let pad = |n: usize| n.div_ceil(4) * 4;
+    let mut out = std::collections::HashMap::new();
+    let mut i = 12;
+    for _ in 0..u32_at(8)? {
+        let kind = *d.get(i)?;
+        let name_len = u16_at(i + 2)? as usize;
+        let name = String::from_utf8_lossy(d.get(i + 4..i + 4 + name_len)?).into_owned();
+        i += 4 + pad(name_len) + 4; // header, name, last-change serial
+        match kind {
+            0 => {
+                out.insert(name, (u32_at(i)? as i32).to_string());
+                i += 4;
+            }
+            1 => {
+                let len = u32_at(i)? as usize;
+                out.insert(name, String::from_utf8_lossy(d.get(i + 4..i + 4 + len)?).into_owned());
+                i += 4 + pad(len);
+            }
+            2 => i += 8,
+            _ => return None,
+        }
+    }
+    Some(out)
 }
 
 /// 16.16 fixed point.
@@ -294,4 +341,30 @@ pub fn rgba(r: f64, g: f64, b: f64, a: f64) -> Color {
 pub fn straight(r: f64, g: f64, b: f64, a: f64) -> Color {
     let c = |v: f64| (v.clamp(0.0, 1.0) * 65535.0).round() as u16;
     Color { red: c(r), green: c(g), blue: c(b), alpha: c(a) }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn parses_xsettings_strings_and_ints() {
+        let mut d = vec![0u8, 0, 0, 0, 1, 0, 0, 0, 3, 0, 0, 0]; // LSB, serial 1, 3 settings
+        let name = |d: &mut Vec<u8>, kind: u8, n: &str| {
+            d.extend([kind, 0]);
+            d.extend((n.len() as u16).to_le_bytes());
+            d.extend(n.as_bytes());
+            d.resize(d.len().div_ceil(4) * 4, 0);
+            d.extend(0u32.to_le_bytes());
+        };
+        name(&mut d, 1, "Gtk/CursorThemeName");
+        d.extend(9u32.to_le_bytes());
+        d.extend(b"DMZ-White\0\0\0");
+        name(&mut d, 2, "Net/Color"); // colours are skipped
+        d.extend([0u8; 8]);
+        name(&mut d, 0, "Gtk/CursorThemeSize");
+        d.extend(68i32.to_le_bytes());
+        let s = super::parse_xsettings(&d).unwrap();
+        assert_eq!(s["Gtk/CursorThemeName"], "DMZ-White");
+        assert_eq!(s["Gtk/CursorThemeSize"], "68");
+        assert!(super::parse_xsettings(&d[..20]).is_none()); // truncated
+    }
 }

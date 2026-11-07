@@ -55,10 +55,13 @@ fn run() -> Res<()> {
     let mut drag: Option<(&'static str, i32, i32, Rect)> = None; // (mode, start x, start y, box at start)
     let mut cursor = String::from("crosshair");
 
+    let mut warm = false;
+
     let action = 'run: loop {
         let animating = opened.elapsed() < FADE || changed.elapsed() < SPIN;
         let mut next = if animating { x.conn.poll_for_event()? } else { Some(x.conn.wait_for_event()?) };
         let mut dirty = animating;
+        let had_input = next.is_some();
         while let Some(event) = next {
             match event {
                 Event::Expose(_) => dirty = true,
@@ -139,9 +142,13 @@ fn run() -> Res<()> {
             let fade = (opened.elapsed().as_secs_f64() / FADE.as_secs_f64()).min(1.0);
             let view = View { sel, fade: 1.0 - (1.0 - fade).powi(3), angle, show_buttons: drag.is_none() };
             scene.draw(&x, &view)?;
+            if !warm {
+                scene.warm_up(&x)?; // the next frame repaints the whole buffer
+                warm = true;
+            }
         }
-        if animating {
-            std::thread::sleep(Duration::from_millis(8)); // present() round-trips; this caps at ~60 fps
+        if animating && !had_input {
+            std::thread::sleep(Duration::from_millis(8)); // idle spin/fade: cap at ~60 fps; input renders at once
         }
     };
 

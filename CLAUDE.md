@@ -13,7 +13,7 @@ Hotkey-launched X11 overlay: freeze screen → drag a Lens-style box → Google 
 - **Linear gradients, not conical:** conical runs on the CPU (~2.7 ms per 3000x40 strip vs 0.4 ms linear). The rotating sweep is sampled into one linear gradient per edge/corner. Gradients need `Repeat::PAD`.
 - The first gradient composite compiles a shader (~30 ms); `Scene::warm_up` does it off-screen right after the first frame.
 - XRender colours: solid fills / FillRectangles are premultiplied (`x::rgba`), gradient stops are not (`x::straight`).
-- The glow spins only while the box changes, then eases to a stop so an idle overlay does no work.
+- Like Lens in Chrome, the coloured glow is hidden while dragging (white brackets only); on release it fades in (350 ms), spins, and eases to a stop after 2.5 s so an idle overlay does no work.
 - Cursor theme/size come from XSETTINGS (`Gtk/CursorThemeName`/`Size`), as GTK does; x11rb alone falls back to the `default` theme (Bibata here vs the desktop's DMZ-White).
 
 ## Gotchas

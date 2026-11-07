@@ -49,6 +49,8 @@ pub struct View {
     pub sel: Option<Rect>,
     /// 0..1 fade-in of the dim layer.
     pub fade: f64,
+    /// 0..1 strength of the coloured border (0 while dragging).
+    pub glow: f64,
     /// Sweep rotation in degrees.
     pub angle: f64,
     pub show_buttons: bool,
@@ -145,11 +147,11 @@ fn label(x: &X, font: &fontdue::Font, text: &str, px: f32) -> Res<Mask> {
 }
 
 /// Colour of the rotating sweep at screen angle `deg` (degrees) around the box centre.
-fn sweep(deg: f64) -> Color {
+fn sweep(deg: f64, alpha: f64) -> Color {
     let t = (deg / 360.0).rem_euclid(1.0) * GOOGLE.len() as f64;
     let (i, f) = (t.floor() as usize % GOOGLE.len(), t.fract());
     let (a, b) = (GOOGLE[i], GOOGLE[(i + 1) % GOOGLE.len()]);
-    straight(a.0 + (b.0 - a.0) * f, a.1 + (b.1 - a.1) * f, a.2 + (b.2 - a.2) * f, 1.0)
+    straight(a.0 + (b.0 - a.0) * f, a.1 + (b.1 - a.1) * f, a.2 + (b.2 - a.2) * f, alpha)
 }
 
 impl Scene {
@@ -237,10 +239,10 @@ impl Scene {
     }
 
     /// Sweep glow: each edge and corner gets a linear gradient sampled from the rotating sweep.
-    fn glow(&self, x: &X, (x0, y0, w, h): Rect, angle: f64) -> Res<()> {
+    fn glow(&self, x: &X, (x0, y0, w, h): Rect, angle: f64, alpha: f64) -> Res<()> {
         let (r, g) = (self.r, self.g);
         let (cx, cy) = (x0 as f64 + w as f64 / 2.0, y0 as f64 + h as f64 / 2.0);
-        let at = |p: (f64, f64)| sweep((p.1 - cy).atan2(p.0 - cx).to_degrees() + angle);
+        let at = |p: (f64, f64)| sweep((p.1 - cy).atan2(p.0 - cx).to_degrees() + angle, alpha);
         let paint = |p1: (f64, f64), p2: (f64, f64), n: usize, mask: Picture, rect: Rect| -> Res<()> {
             let stops: Vec<_> = (0..=n)
                 .map(|k| {
@@ -272,7 +274,7 @@ impl Scene {
     /// Draw the glow once off-screen: the driver compiles its gradient shader on first use
     /// (~30 ms here), which would otherwise land on the first frame of a drag.
     pub fn warm_up(&self, x: &X) -> Res<()> {
-        self.glow(x, (self.g, self.g, 4 * self.r, 4 * self.r), 0.0)
+        self.glow(x, (self.g, self.g, 4 * self.r, 4 * self.r), 0.0, 1.0)
     }
 
     pub fn draw(&self, x: &X, v: &View) -> Res<()> {
@@ -291,7 +293,9 @@ impl Scene {
                     let pos = (if fx { x0 + w - r } else { x0 }, if fy { y0 + h - r } else { y0 });
                     x.composite(x.shot, Some(self.fill_corners[i]), (0, 0), (pos.0, pos.1, r, r))?;
                 }
-                self.glow(x, sel, v.angle)?;
+                if v.glow > 0.0 {
+                    self.glow(x, sel, v.angle, v.glow)?;
+                }
                 // brackets, clipped at the box's midlines so small boxes don't overlap them
                 let (pad, size) = (self.bracket_pad, self.bracket_size);
                 let (cw, ch) = (size.min(pad + w / 2), size.min(pad + h / 2));
@@ -351,8 +355,8 @@ mod tests {
     fn sweep_hits_google_colours() {
         let rgb = |c: Color| (c.red, c.green, c.blue, c.alpha); // Color has no PartialEq
         let google = |i: usize| rgb(straight(GOOGLE[i].0, GOOGLE[i].1, GOOGLE[i].2, 1.0));
-        assert_eq!(rgb(sweep(0.0)), google(0));
-        assert_eq!(rgb(sweep(90.0)), google(1));
-        assert_eq!(rgb(sweep(-90.0)), rgb(sweep(270.0)));
+        assert_eq!(rgb(sweep(0.0, 1.0)), google(0));
+        assert_eq!(rgb(sweep(90.0, 1.0)), google(1));
+        assert_eq!(rgb(sweep(-90.0, 1.0)), rgb(sweep(270.0, 1.0)));
     }
 }

@@ -22,9 +22,11 @@ const XK_KP_ENTER: u32 = 0xff8d;
 const XK_C: u32 = 0x43;
 const XK_LOWER_C: u32 = 0x63;
 const FADE: Duration = Duration::from_millis(180);
-/// The glow spins while the box changes, then eases to a stop so an idle overlay costs nothing.
-const SPIN: Duration = Duration::from_millis(1600);
-const SPIN_SPEED: f64 = 220.0; // degrees per second at full speed
+/// Like Lens in Chrome, the coloured border appears once a drag ends: it fades in, spins,
+/// then eases to a stop so an idle overlay costs nothing.
+const GLOW_IN: Duration = Duration::from_millis(350);
+const SPIN: Duration = Duration::from_millis(2500);
+const SPIN_SPEED: f64 = 260.0; // degrees per second at full speed
 
 enum Action {
     Search,
@@ -49,7 +51,7 @@ fn run() -> Res<()> {
     let min_size = (12.0 * s) as i32;
     let opened = Instant::now();
     let mut last_frame = opened;
-    let mut changed = opened.checked_sub(SPIN).unwrap_or(opened); // last selection change; drives the spin
+    let mut settled: Option<Instant> = None; // when the current box was released; drives the glow
     let mut angle = 0.0;
     let mut sel: Option<Rect> = None;
     let mut drag: Option<(&'static str, i32, i32, Rect)> = None; // (mode, start x, start y, box at start)
@@ -58,7 +60,7 @@ fn run() -> Res<()> {
     let mut warm = false;
 
     let action = 'run: loop {
-        let animating = opened.elapsed() < FADE || changed.elapsed() < SPIN;
+        let animating = opened.elapsed() < FADE || settled.is_some_and(|t| t.elapsed() < SPIN);
         let mut next = if animating { x.conn.poll_for_event()? } else { Some(x.conn.wait_for_event()?) };
         let mut dirty = animating;
         let had_input = next.is_some();
@@ -94,14 +96,13 @@ fn run() -> Res<()> {
                     };
                     sel = Some(start.1);
                     drag = Some((start.0, px, py, start.1));
-                    changed = Instant::now();
+                    settled = None;
                     dirty = true;
                 }
                 Event::MotionNotify(m) => {
                     let (px, py) = (m.event_x as i32, m.event_y as i32);
                     if let Some((mode, sx, sy, orig)) = drag {
                         sel = Some(geom::adjust(mode, orig, px - sx, py - sy, x.w, x.h));
-                        changed = Instant::now();
                         dirty = true;
                     } else {
                         let want = match sel {
@@ -125,6 +126,8 @@ fn run() -> Res<()> {
                     drag = None;
                     if sel.is_some_and(|(_, _, w, h)| w < min_size || h < min_size) {
                         sel = None;
+                    } else {
+                        settled = Some(Instant::now());
                     }
                     dirty = true;
                 }
@@ -136,11 +139,18 @@ fn run() -> Res<()> {
 
         if dirty {
             let now = Instant::now();
-            let slowdown = 1.0 - (changed.elapsed().as_secs_f64() / SPIN.as_secs_f64()).min(1.0);
+            let ease = |t: f64| 1.0 - (1.0 - t.min(1.0)).powi(3);
+            let since = settled.map(|t| t.elapsed().as_secs_f64());
+            let slowdown = since.map_or(0.0, |e| 1.0 - (e / SPIN.as_secs_f64()).min(1.0));
             angle = (angle + (now - last_frame).as_secs_f64() * SPIN_SPEED * slowdown) % 360.0;
             last_frame = now;
-            let fade = (opened.elapsed().as_secs_f64() / FADE.as_secs_f64()).min(1.0);
-            let view = View { sel, fade: 1.0 - (1.0 - fade).powi(3), angle, show_buttons: drag.is_none() };
+            let view = View {
+                sel,
+                fade: ease(opened.elapsed().as_secs_f64() / FADE.as_secs_f64()),
+                glow: since.map_or(0.0, |e| ease(e / GLOW_IN.as_secs_f64())),
+                angle,
+                show_buttons: drag.is_none(),
+            };
             scene.draw(&x, &view)?;
             if !warm {
                 scene.warm_up(&x)?; // the next frame repaints the whole buffer

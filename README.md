@@ -1,6 +1,6 @@
 # linux-circle-to-search
 
-Android-style "Circle to Search" for Linux (X11). Press a shortcut, draw around anything on screen, then:
+Android-style "Circle to Search" for Linux (X11). Press a shortcut, drag a box around anything on screen (Google Lens style: drag corners/edges to resize, drag inside to move), then:
 
 - **Search** (Enter): opens the selection in Google Lens in your browser
 - **Copy text** (C): reads the text with Tesseract OCR and copies it to the clipboard
@@ -33,4 +33,4 @@ python3 test_circle_search.py
 
 ## Notes
 
-Lens search uses Google's undocumented `lens.google.com/v3/upload` endpoint and may break if Google changes it.
+Lens search opens a small local page (in `$XDG_RUNTIME_DIR`) that makes your browser post the image to Google's undocumented `lens.google.com/v3/upload` endpoint. It may break if Google changes that endpoint.

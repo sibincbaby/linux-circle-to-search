@@ -99,9 +99,13 @@ def ocr_text(png):
 
 def lens_page(png):
     """Write the auto-uploading Lens page for PNG bytes to a private file and return its path."""
-    # Fixed name in the per-user runtime dir (tmpfs, mode 0700): overwritten each run, nothing piles up.
-    path = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir(), "circle-search-lens.html")
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    runtime = os.environ.get("XDG_RUNTIME_DIR")
+    if runtime:
+        # Fixed name in the private per-user runtime dir (mode 0700): overwritten each run, nothing piles up.
+        path = os.path.join(runtime, "circle-search-lens.html")
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    else:  # shared /tmp: unique O_EXCL file so nobody can pre-plant a symlink
+        fd, path = tempfile.mkstemp(prefix="circle-search-", suffix=".html")
     with os.fdopen(fd, "w") as f:
         f.write(LENS_PAGE % base64.b64encode(png).decode())
     return path

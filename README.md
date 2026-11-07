@@ -5,30 +5,31 @@ Android-style "Circle to Search" for Linux (X11). Press a shortcut, drag a box a
 - **Search** (Enter): opens the selection in Google Lens in your browser
 - **Copy text** (C): reads the text with Tesseract OCR and copies it to the clipboard
 
-Esc or right-click cancels. A single Python script, no API keys, no third-party image host.
+Esc or right-click cancels. No API keys, no third-party image host.
+
+## Why it's light
+
+It's a ~750 KB Rust binary that runs only when you press the shortcut (nothing in the background). The frozen screen, dimming, glow animation and text are all drawn by the X server through XRender (GPU-accelerated on most drivers), so the process itself stays around **12 MB** and opens its overlay in **about a millisecond**, even at 4K.
 
 ## Requirements
 
-Python 3 with GTK 3 bindings (`python3-gi`), `xclip`, `xdg-open`, `notify-send`, and for OCR:
+- An X11 session (tested on Linux Mint Cinnamon, 4K at 2x scale). Wayland is not supported.
+- `xdg-open`, `notify-send`, `xclip`, and for OCR: `sudo apt install tesseract-ocr`
+- Rust (to build)
+
+## Install
 
 ```bash
-sudo apt install tesseract-ocr
+cargo install --path .
 ```
 
-Works on X11 sessions (tested on Linux Mint Cinnamon, HiDPI). Wayland is not supported.
+Then bind `~/.cargo/bin/circle-search` to a keyboard shortcut (e.g. Ctrl+Alt+S) in your desktop's keyboard settings.
 
-## Setup
-
-```bash
-chmod +x circle_search.py
-```
-
-Bind `/path/to/circle_search.py` to a keyboard shortcut (e.g. Super+S) in your desktop's keyboard settings.
-
-## Test
+## Develop
 
 ```bash
-python3 test_circle_search.py
+cargo test
+cargo clippy --all-targets -- -D warnings
 ```
 
 ## Notes

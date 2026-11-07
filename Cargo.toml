@@ -1,0 +1,17 @@
+[package]
+name = "circle-search"
+version = "0.1.0"
+edition = "2021"
+description = "Android-style Circle to Search for Linux (X11): select anything on screen, search it with Google Lens or copy its text"
+repository = "https://github.com/sibincbaby/linux-circle-to-search"
+
+[dependencies]
+fontdue = "0.9"
+png = "0.18"
+x11rb = { version = "0.14", features = ["cursor", "render", "resource_manager"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
